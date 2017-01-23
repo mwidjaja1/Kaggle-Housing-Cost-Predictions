@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sat Jan 21 20:29:06 2017
-
-@author: Matthew
+--test_csv /Users/Matthew/Github/Kaggle_Housing/test.csv
 """
 
 from argparse import ArgumentParser
+import datetime as dt
+import itertools
 import logging
 import math
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
-from sklearn import linear_model
-from sklearn.naive_bayes import GaussianNB
+from sklearn.feature_selection import SelectKBest, SelectPercentile, chi2
 import sys
+
+import model
 
 
 def input_args(inargs):
@@ -41,13 +43,18 @@ def load_data(args):
                    this will be 50% of the data & train_data is the other 50%.
     """
     try:
+        all_data = pd.read_csv(args.train_csv, index_col=0)
+    except Exception as err:
+        logging.exception(err)
+        sys.exit(1)
+
+    try:
         if args.test_csv:
-            train_data = pd.read_csv(args.train_csv, index_col='Id')
-            test_data = pd.read_csv(args.test_data, index_col='Id')
+            test_data = pd.read_csv(args.test_csv, index_col=0)
+            train_data = remove_outliers(all_data)
         else:
-            train_data = pd.read_csv(args.train_csv, index_col='Id')
-            test_data = train_data.sample(frac=0.5)
-            train_data = train_data.drop(test_data.index)
+            test_data = all_data.sample(frac=0.4)
+            train_data = remove_outliers(all_data.drop(test_data.index))
     except Exception as err:
         logging.exception(err)
         sys.exit(1)
@@ -55,10 +62,26 @@ def load_data(args):
     try:
         train_data = convert_to_floats(train_data)
         test_data = convert_to_floats(test_data)
-        return train_data, test_data
+        return all_data, train_data, test_data
     except Exception as err:
         logging.exception(err)
         sys.exit(1)
+
+
+def remove_outliers(data):
+    """ Removes the top & bottom 5% of sale prices from the data
+
+        Input/Output:
+        data: DataFrame to clean data from, must have 'SalePrice' column
+    """
+    try:
+        perc = np.percentile(data['SalePrice'], [5, 95])
+        cleaned_data = data[(data['SalePrice'] > perc[0]) &
+                            (data['SalePrice'] < perc[1])]
+    except Exception as err:
+        logging.exception(err)
+        sys.exit(1)
+    return cleaned_data
 
 
 def convert_to_floats(data):
@@ -89,7 +112,7 @@ def convert_to_floats(data):
 
     # Converts all strings to integers and fills nan values
     data = data.replace(convert)
-    data = data.fillna(-1000)
+    data = data.fillna(0)
     return data
 
 
@@ -119,45 +142,6 @@ def split_data(data):
         sys.exit(1)
 
 
-def gaussian_nb(house_train, price_train, house_test, price_answer):
-    """ Runs GaussianNb model
-
-        Input:
-        house_train: Training data for house attributes
-        price_train: Training data for prices
-        house_test: Test data for house attributes
-        price_answer: Test data for prices
-
-        Output:
-        A Dict with {'results': <price_gnb>, 'score': <score_gnb>}
-    """
-    gnb = GaussianNB()
-    price_gnb = gnb.fit(house_train, price_train).predict(house_test)
-    score_gnb = gnb.score(price_answer, price_gnb.reshape(-1, 1))
-    print('Gaussian NB Score: {}'.format(score_gnb))
-    return {'results': price_gnb, 'score': score_gnb}
-
-
-def linear_regr(house_train, price_train, house_test, price_answer):
-    """ Runs Linear Regression model
-
-        Input:
-        house_train: Training data for house attributes
-        price_train: Training data for prices
-        house_test: Test data for house attributes
-        price_answer: Test data for prices
-
-        Output:
-        A Dict with {'results': <price_gnb>, 'score': <score_gnb>}
-    """
-    lrg = linear_model.LinearRegression()
-    price_lrg = lrg.fit(house_train, price_train).predict(house_test)
-    score_lrg = 0
-    #score_lrg = lrg.score(price_answer, price_lrg.reshape(-1, 1))
-    #print('Linear Regression Score: {}'.format(score_lrg))
-    return {'results': price_lrg, 'score': score_lrg}
-
-
 def compare_data(price_test, models, output_dir=None):
     """ Plots the difference between each price in the test set versus model
 
@@ -170,11 +154,11 @@ def compare_data(price_test, models, output_dir=None):
         Output:
         A plot saved to output_dir if specified
     """
-    for model in models:
-        y_axis = (price_test - models[model]['results']).tolist()[0]
-        x_axis = [x for x in range(len(y_axis))]
-        plt.scatter(x_axis, y_axis)
-        plt.title('{}: {}'.format(model, models[model]['score']))
+    for key in models:
+        plt.scatter(price_test, models[key]['results'])
+        plt.xlabel('Measured')
+        plt.ylabel('Predicted')
+        plt.title('{}: {}'.format(model, models[key]['score']))
         plt.tight_layout()
         if output_dir:
             plt.save(output_dir)
@@ -182,26 +166,44 @@ def compare_data(price_test, models, output_dir=None):
             plt.show()
 
 
+def output_data(house_test, price_model):
+    """ Exports the prices estimated by the model """
+    date = dt.datetime.now().strftime('%m%d_%H%M')
+    out_df = pd.DataFrame(price_model['results'], index=house_test.index,
+                          columns=['SalePrice'])
+    out_df.to_csv('data_{}.csv'.format(date))
+
+
 def main(inargs=None):
     """ Main driver function """
     args = input_args(inargs)
-    train_data, test_data = load_data(args)
+    all_data, train_data, test_data = load_data(args)
     price_train, house_train = split_data(train_data)
-    price_test, house_test = split_data(train_data)
-    price_test = price_test.reshape(-1, 1)
+    price_test, house_test = split_data(test_data)
 
     # Test models
     models = {}
-    models['gnb'] = gaussian_nb(house_train, price_train,
-                                house_test, price_test)
-    models['linear_regr'] = linear_regr(house_train, price_train,
-                                        house_test, price_test)
+    # max_score = (None, {}, 0.0)
+    # for opt in itertools.product(list(range(1, 21)), list(range(1, 21))):
+    opt = (12, 18)
+    models['rf_class'] = model.random_forest(house_train, price_train,
+                                             house_test, price_test, opt)
+    models['rf_regr'] = model.random_forest_regr(house_train, price_train,
+                                                 house_test, price_test, opt)
+    # if models['rf_regr']['score'] > max_score[2]:
+    #    max_score = (opt, models, models['rf_regr']['score'])
 
-    # Compares models via plotting
-    compare_data(price_test, models)
+    # Compares models via plotting and/or output results
+    print
+    if not args.test_csv:
+        compare_data(price_test, models)
+        # print('Best Results were {} with {}'.format(max_score[2], max_score[0]))
+        # compare_data(price_test, max_score[1])
+    else:
+        output_data(house_test, models['tree'])
 
-    return price_train, house_train, price_test, house_test, models
+    return all_data, price_train, house_train, price_test, house_test, models
 
 
 if __name__ == "__main__":
-    price_train, house_train, price_test, house_test, models = main()
+    all_data, price_train, house_train, price_test, house_test, models = main()
